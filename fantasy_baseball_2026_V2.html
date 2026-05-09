@@ -2141,6 +2141,16 @@ async function renderWeekGrid() {
     const FG_TO_MLB = { 'WSN':'WSH','KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','CHW':'CWS' };
     const normalizeTeam = t => FG_TO_MLB[t?.toUpperCase()] || t?.toUpperCase() || '';
 
+    // Get roster hitters
+    const roster = await loadTeamRoster(teamKey);
+    const rosterHitters = roster.filter(rp => {
+      const sel  = (rp.selPos || '').toUpperCase();
+      const pos  = (rp.pos || '').toUpperCase();
+      if (sel === 'SP' || sel === 'RP' || sel === 'P') return false;
+      if (pos.includes('SP') || pos.includes('RP') || pos === 'P') return false;
+      return true;
+    });
+
     const statsById = {}, statsByName = {};
     hitters.forEach(p => {
       if (p.fg?.xMLBAMID) statsById[String(p.fg.xMLBAMID)] = p;
