@@ -2070,92 +2070,44 @@ async function renderWeekGrid() {
   status.style.color = '#ffd600';
 
   try {
-    const fetchWT = (url, ms=10000) => Promise.race([
-      fetch(url).then(r => {
-        if (!r.ok) return null;
-        const ct = r.headers.get("content-type") || "";
-        return ct.includes("json") ? r.json() : r.text();
-      }),
+    const fetchWT = (url, ms=8000) => Promise.race([
+      fetch(url).then(r => r.ok ? r.json() : null),
       new Promise(res => setTimeout(() => res(null), ms)),
     ]);
 
     const FG_NORM  = { 'SDP':'SD','SFG':'SF','KCR':'KC','CHW':'CWS','WSN':'WSH','TBR':'TB','ATH':'OAK' };
     const normAbbr = t => FG_NORM[t?.toUpperCase()] || t?.toUpperCase() || '';
 
-    // Team name → MLB abbreviation for FantasyPros rows
-    const FP_TEAM = {
-      'athletics':'OAK','arizona diamondbacks':'ARI','atlanta braves':'ATL',
-      'baltimore orioles':'BAL','boston red sox':'BOS','chicago cubs':'CHC',
-      'chicago white sox':'CWS','cincinnati reds':'CIN','cleveland guardians':'CLE',
-      'colorado rockies':'COL','detroit tigers':'DET','houston astros':'HOU',
-      'kansas city royals':'KC','los angeles angels':'LAA','los angeles dodgers':'LAD',
-      'miami marlins':'MIA','milwaukee brewers':'MIL','minnesota twins':'MIN',
-      'new york mets':'NYM','new york yankees':'NYY','oakland athletics':'OAK',
-      'philadelphia phillies':'PHI','pittsburgh pirates':'PIT','san diego padres':'SD',
-      'san francisco giants':'SF','seattle mariners':'SEA','st. louis cardinals':'STL',
-      'tampa bay rays':'TB','texas rangers':'TEX','toronto blue jays':'TOR',
-      'washington nationals':'WSH',
+    // Generate 7 ET dates
+    const etDate = d => {
+      const dt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+      dt.setDate(dt.getDate() + d);
+      return dt.toLocaleDateString('en-CA');
     };
+    const dates = Array.from({length:7}, (_,i) => etDate(i));
 
-    // Opponent abbr from cell like "@BAL" or "STL"
-    const FP_OPP = {
-      'BAL':'BAL','BOS':'BOS','NYY':'NYY','TB':'TB','TOR':'TOR',
-      'CWS':'CWS','CLE':'CLE','DET':'DET','KC':'KC','MIN':'MIN',
-      'HOU':'HOU','LAA':'LAA','OAK':'OAK','SEA':'SEA','TEX':'TEX',
-      'ATL':'ATL','MIA':'MIA','NYM':'NYM','PHI':'PHI','WSH':'WSH',
-      'CHC':'CHC','CIN':'CIN','MIL':'MIL','PIT':'PIT','STL':'STL',
-      'ARI':'ARI','COL':'COL','LAD':'LAD','SD':'SD','SF':'SF',
-      'ATH':'OAK',
-    };
+    // Fetch all 7 days in parallel from MLB Stats API
+    const schedules = await Promise.all(
+      dates.map(d => fetchWT(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${d}&hydrate=probablePitcher,team&gameType=R`))
+    );
 
-    // Fetch FantasyPros via CORS proxy
-    status.textContent = 'Fetching FantasyPros probables…';
-    const fpUrl = 'https://www.fantasypros.com/mlb/probable-pitchers.php';
-    const proxies = [
-      `https://corsproxy.io/?url=${encodeURIComponent(fpUrl)}`,
-      `https://api.allorigins.win/get?url=${encodeURIComponent(fpUrl)}`,
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(fpUrl)}`,
-    ];
-
-    let fpHtml = null;
-    for (const proxy of proxies) {
-      try {
-        const res = await fetchWT(proxy);
-        const html = (typeof res === 'string') ? res : (res?.contents || null);
-        if (html && html.includes('probable-pitchers') && html.length > 10000) { fpHtml = html; break; }
-      } catch(e) { console.warn('Proxy failed:', proxy, e); }
-    }
-    if (!fpHtml) throw new Error('Could not fetch FantasyPros — try again later');
-
-    const parser  = new DOMParser();
-    const doc     = parser.parseFromString(fpHtml, 'text/html');
-    const table   = doc.querySelector('table');
-    if (!table) throw new Error('No table found on FantasyPros');
-
-    // Parse column headers → dates
-    const headers = [...table.querySelectorAll('thead th')];
-    const colDates = []; // index → YYYY-MM-DD date string
-    headers.forEach((th, i) => {
-      if (i === 0) return; // skip "Team" column
-      const txt = th.textContent.trim(); // e.g. "Fri May 8"
-      // Parse to YYYY-MM-DD
-      const match = txt.match(/(\w+)\s+(\d+)/);
-      if (match) {
-        const monthName = match[1];
-        const day       = parseInt(match[2]);
-        const months    = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
-        const month     = months[monthName];
-        if (month) {
-          const year = new Date().getFullYear();
-          const d    = new Date(year, month-1, day);
-          colDates[i] = d.toLocaleDateString('en-CA'); // YYYY-MM-DD
-        }
+    // Batch fetch pitcher handedness
+    const pitcherIds = new Set();
+    for (const s of schedules) {
+      for (const g of (s?.dates?.[0]?.games || [])) {
+        if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
+        if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
       }
-    });
+    }
+    const handMap = {};
+    if (pitcherIds.size > 0) {
+      const pData = await fetchWT(`https://statsapi.mlb.com/api/v1/people?personIds=${[...pitcherIds].join(',')}&hydrate=currentTeam`);
+      (pData?.people||[]).forEach(p => { handMap[p.id] = p.pitchHand?.code || '?'; });
+    }
 
-    const dates = colDates.filter(Boolean);
+    const allDayData = schedules.map((s, i) => ({ date: dates[i], games: s?.dates?.[0]?.games || [] }));
 
-    // Build grid from table rows
+    // Build grid
     const grid = {};
     const normN = n => (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z]/g,'');
 
@@ -2170,113 +2122,22 @@ async function renderWeekGrid() {
       return pitchers.find(p => p.name.split(' ').slice(-1)[0].toLowerCase() === last)?.fg?.Throws || null;
     };
 
-    const rows = table.querySelectorAll('tbody tr');
-    for (const row of rows) {
-      const cells = row.querySelectorAll('td');
-      if (!cells.length) continue;
-      const teamRaw  = cells[0]?.textContent?.trim().toLowerCase();
-      const teamAbbr = FP_TEAM[teamRaw];
-      if (!teamAbbr) continue;
-
-      cells.forEach((cell, i) => {
-        if (i === 0) return;
-        const date = colDates[i];
-        if (!date) return;
-        const txt  = cell.textContent.trim();
-        if (!txt)  { 
-          // OFF day
-          if (!grid[teamAbbr]) grid[teamAbbr] = {};
-          grid[teamAbbr][date] = null; // null = off day
-          return;
-        }
-
-        // Parse "@BAL\nJ. Lopez\n(2-2)\nSP 166"
-        const lines  = txt.split(/\n/).map(l => l.trim()).filter(Boolean);
-        if (lines.length < 2) return;
-
-        const oppRaw = lines[0].replace('@','').trim();
-        const isHome = !lines[0].startsWith('@');
-        const oppAbbr = FP_OPP[oppRaw] || normAbbr(oppRaw);
-        const spShort = lines[1]; // e.g. "J. Lopez" or "TBD"
-        const isTBD   = spShort === 'TBD' || !spShort;
-
-        // Try to get full name from pitcher link href
-        const link = cell.querySelector('a');
-        let fullName = null;
-        if (link) {
-          const href = link.getAttribute('href') || '';
-          // /mlb/players/jacob-lopez.php → "Jacob Lopez"
-          const slug = href.match(/\/mlb\/players\/([^.]+)\.php/)?.[1];
-          if (slug) {
-            fullName = slug.split('-').map(w => w.charAt(0).toUpperCase()+w.slice(1)).join(' ');
-          }
-        }
-        fullName = fullName || matchSP(spShort) || spShort;
-
-        if (!grid[teamAbbr]) grid[teamAbbr] = {};
-        grid[teamAbbr][date] = {
-          sp:        isTBD ? null : fullName,
-          hand:      isTBD ? null : matchHand(fullName || spShort),
-          opp:       oppAbbr,
-          isHome,
-          confirmed: false, // FantasyPros = projected
-        };
-      });
-    }
-
-    // Now overlay confirmed pitchers from MLB Stats API for today + next 2 days
-    const etDate = d => {
-      const dt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-      dt.setDate(dt.getDate() + d);
-      return dt.toLocaleDateString('en-CA');
-    };
-    const confirmedDates = [etDate(0), etDate(1), etDate(2)];
-    const mlbSchedules = await Promise.all(
-      confirmedDates.map(d => fetchWT(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${d}&hydrate=probablePitcher,team&gameType=R`))
-    );
-    const pitcherIds = new Set();
-    for (const s of mlbSchedules) {
-      for (const g of (s?.dates?.[0]?.games || [])) {
-        if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
-        if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
-      }
-    }
-    const handMap = {};
-    if (pitcherIds.size > 0) {
-      const pData = await fetchWT(`https://statsapi.mlb.com/api/v1/people?personIds=${[...pitcherIds].join(',')}&hydrate=currentTeam`);
-      (pData?.people||[]).forEach(p => { handMap[p.id] = p.pitchHand?.code || '?'; });
-    }
-    for (let i = 0; i < confirmedDates.length; i++) {
-      const date  = confirmedDates[i];
-      const games = mlbSchedules[i]?.dates?.[0]?.games || [];
+    for (const { date, games } of allDayData) {
       for (const g of games) {
-        const awayAbbr = normAbbr(g.teams?.away?.team?.abbreviation);
-        const homeAbbr = normAbbr(g.teams?.home?.team?.abbreviation);
+        const awayAbbr = normAbbr(g.teams?.away?.team?.abbreviation || '?');
+        const homeAbbr = normAbbr(g.teams?.home?.team?.abbreviation || '?');
         const awayPP   = g.teams?.away?.probablePitcher || null;
         const homePP   = g.teams?.home?.probablePitcher || null;
-        if (awayPP && grid[awayAbbr]?.[date]) {
-          grid[awayAbbr][date].sp        = matchSP(awayPP.fullName) || grid[awayAbbr][date].sp;
-          grid[awayAbbr][date].hand      = handMap[awayPP.id] || matchHand(awayPP.fullName);
-          grid[awayAbbr][date].confirmed = true;
-        }
-        if (homePP && grid[homeAbbr]?.[date]) {
-          grid[homeAbbr][date].sp        = matchSP(homePP.fullName) || grid[homeAbbr][date].sp;
-          grid[homeAbbr][date].hand      = handMap[homePP.id] || matchHand(homePP.fullName);
-          grid[homeAbbr][date].confirmed = true;
-        }
+        const awayHand = awayPP ? (handMap[awayPP.id] || matchHand(awayPP.fullName)) : null;
+        const homeHand = homePP ? (handMap[homePP.id] || matchHand(homePP.fullName)) : null;
+
+        if (!grid[awayAbbr]) grid[awayAbbr] = {};
+        grid[awayAbbr][date] = { sp: homePP ? matchSP(homePP.fullName) : null, hand: homeHand, opp: homeAbbr, isHome: false, confirmed: !!homePP?.id };
+
+        if (!grid[homeAbbr]) grid[homeAbbr] = {};
+        grid[homeAbbr][date] = { sp: awayPP ? matchSP(awayPP.fullName) : null, hand: awayHand, opp: awayAbbr, isHome: true, confirmed: !!awayPP?.id };
       }
     }
-
-    // Get hitters from roster to find which MLB teams to show
-    const roster = await loadTeamRoster(teamKey);
-    const rosterHitters = roster.filter(rp => {
-      const sel = (rp.selPos||'').toUpperCase();
-      const pos = (rp.pos||'').toUpperCase();
-      if (sel === 'SP'||sel === 'RP'||sel === 'P') return false;
-      if (pos.includes('SP')||pos.includes('RP')||pos === 'P') return false;
-      return true;
-    });
-
     const FG_TO_MLB = { 'WSN':'WSH','KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','CHW':'CWS' };
     const normalizeTeam = t => FG_TO_MLB[t?.toUpperCase()] || t?.toUpperCase() || '';
 
@@ -2360,7 +2221,12 @@ async function renderWeekGrid() {
     html += `</tbody></table>`;
 
     _weekGridCache = html;
-    output.innerHTML = `<div style="overflow-x:auto;padding-bottom:40px">${html}</div>`;
+    output.innerHTML = `<div style="overflow-x:auto;padding-bottom:40px">
+      <div style="padding:10px 0 12px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border);margin-bottom:4px">
+        <a href="https://www.fangraphs.com/roster-resource/probables-grid?view=opposing" target="_blank" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);text-decoration:none;opacity:0.8;border:1px solid var(--border);padding:4px 10px;border-radius:4px">↗ Full 10-day grid on FanGraphs</a>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3)">MLB API · confirmed pitchers only · TBD = not yet announced</span>
+      </div>
+      ${html}</div>`;
     status.textContent = `✓ 7-day grid loaded`;
     status.style.color = '#00c853';
 
